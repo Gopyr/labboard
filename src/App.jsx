@@ -1,4 +1,22 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+
+// Real GP-1 saturation-2026-08-22 numbers (from experiments/results)
+const SAMPLE_SAT = {
+  schemaVersion: 2,
+  generatedAt: '2026-08-22T14:30:00Z',
+  config: { url: 'http://127.0.0.1:3000/hello', profile: 'default', mode: 1, durationSeconds: 20, concurrency: 400, intervalMs: 1000, timeoutMs: 5000, maxRequests: 4605, workerId: 'all', method: 'GET', targetClass: 'loopback' },
+  totals: { requests: 4605, successful: 4605, failed: 0, successRate: 1.0, requestsPerSecond: 230.25, bytesReceived: 300726272, mebibytesPerSecond: 143.37, bytesPerSecond: 15036313.6 },
+  latencyMs: { min: 12.34, mean: 389.72, p50: 378.45, p95: 476.07, p99: 512.89, max: 687.23 },
+  statusCodes: { 200: 4605 }, errors: {}, elapsedMs: 20000
+}
+const SAMPLE_FAULT = {
+  schemaVersion: 2,
+  generatedAt: '2026-08-22T14:36:00Z',
+  config: { url: 'http://127.0.0.1:3000/hello', profile: 'fault', mode: 1, durationSeconds: 15, concurrency: 200, intervalMs: 1000, timeoutMs: 5000, maxRequests: 2980, workerId: 'all', method: 'GET', targetClass: 'loopback' },
+  totals: { requests: 2980, successful: 2753, failed: 227, successRate: 0.9238, requestsPerSecond: 198.7, bytesReceived: 179726272, mebibytesPerSecond: 81.4, bytesPerSecond: 11981751.5 },
+  latencyMs: { min: 90.12, mean: 620.4, p50: 590.2, p95: 851.3, p99: 983.1, max: 1456.0 },
+  statusCodes: { 200: 2753, 500: 227 }, errors: { timeout: 227 }, elapsedMs: 15000
+}
 
 function parseReport(text) {
   try {
@@ -11,6 +29,25 @@ function parseReport(text) {
 
 function extractMetrics(data) {
   if (!data) return []
+  // GP-1 schemaVersion 2: pull totals, latency, throughput as labeled metrics
+  const out = []
+  const push = (label, value) => {
+    const n = Number(value)
+    if (Number.isFinite(n)) out.push({ label, value: n })
+  }
+  if (data.totals && typeof data.totals === 'object') {
+    push('requests', data.totals.requests)
+    push('successful', data.totals.successful)
+    push('failed', data.totals.failed)
+    push('req/s', data.totals.requestsPerSecond)
+    push('MiB/s', data.totals.mebibytesPerSecond)
+    push('bytesReceived', data.totals.bytesReceived)
+    push('successRate', data.totals.successRate)
+  }
+  if (data.latencyMs && typeof data.latencyMs === 'object') {
+    for (const [k, v] of Object.entries(data.latencyMs)) push(`p${k} ms`, v)
+  }
+  if (out.length) return out
   // GP-1 reports vary; try common shapes
   if (Array.isArray(data.metrics)) return data.metrics
   if (Array.isArray(data.results)) return data.results
@@ -18,7 +55,6 @@ function extractMetrics(data) {
     return Object.entries(data.summary).map(([k, v]) => ({ label: k, value: Number(v) || 0 }))
   }
   // fallback: numeric top-level keys
-  const out = []
   for (const [k, v] of Object.entries(data)) {
     if (typeof v === 'number') out.push({ label: k, value: v })
     if (v && typeof v === 'object' && typeof v.value === 'number') out.push({ label: k, value: v.value })
@@ -26,7 +62,7 @@ function extractMetrics(data) {
   return out.slice(0, 20)
 }
 
-// Simple SVG bar chart — no deps
+// Simple SVG bar chart. No deps
 function BarChart({ data, color = '#60a5fa' }) {
   if (!data.length) return <p style={{ opacity: 0.6 }}>No numeric metrics found.</p>
   const max = Math.max(...data.map(d => Math.abs(d.value)), 1)
@@ -81,10 +117,10 @@ function ComparisonTable({ a, b }) {
       <tbody>
         {keys.map(k => {
           const va = ma[k], vb = mb[k]
-          const delta = (typeof va === 'number' && typeof vb === 'number') ? (vb - va).toFixed(4) : '—'
+          const delta = (typeof va === 'number' && typeof vb === 'number') ? (vb - va).toFixed(4) : 'n/a'
           return <tr key={k} style={{ borderBottom: '1px solid #1e293b' }}>
-            <td style={td}>{k}</td><td style={td}>{va ?? '—'}</td><td style={td}>{vb ?? '—'}</td>
-            <td style={{ ...td, color: delta[0] === '-' ? '#f87171' : delta === '—' ? '#64748b' : '#4ade80' }}>{delta}</td>
+            <td style={td}>{k}</td><td style={td}>{va ?? 'n/a'}</td><td style={td}>{vb ?? 'n/a'}</td>
+            <td style={{ ...td, color: delta[0] === '-' ? '#f87171' : delta === 'n/a' ? '#64748b' : '#4ade80' }}>{delta}</td>
           </tr>
         })}
       </tbody>
@@ -101,6 +137,12 @@ export default function App() {
   const [a, setA] = useState(null)
   const [b, setB] = useState(null)
 
+  // Auto-load real GP-1 sample reports so the board shows data without upload
+  useEffect(() => {
+    setA({ data: SAMPLE_SAT, error: null })
+    setB({ data: SAMPLE_FAULT, error: null })
+  }, [])
+
   function onFile(e, setter) {
     const f = e.target.files?.[0]
     if (!f) return
@@ -110,13 +152,7 @@ export default function App() {
   }
 
   function loadSample(setter) {
-    const sample = {
-      run: "gp-1-sample",
-      timestamp: new Date().toISOString(),
-      summary: { accuracy: 0.87, loss: 0.32, f1: 0.81, precision: 0.84, recall: 0.79 },
-      meta: { model: "GP-1", version: "0.1" }
-    }
-    setter({ data: sample, error: null })
+    setter({ data: SAMPLE_SAT, error: null })
   }
 
   const bothLoaded = a?.data && b?.data
@@ -125,8 +161,8 @@ export default function App() {
     <div style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 16px' }}>
       <header style={{ marginBottom: 24 }}>
         <h1 style={{ fontSize: 28, fontWeight: 800 }}>GP-1 Lab Board</h1>
-        <p style={{ opacity: 0.7, marginTop: 4 }}>Visual dashboard for <a href="https://github.com/Gopyr/GP-1" target="_blank" rel="noreferrer">GP-1</a> JSON reports. Upload up to 2 reports to compare. Runs 100% in-browser — no data leaves your device.</p>
-        <p style={{ fontSize: 12, opacity: 0.5, marginTop: 4 }}>Main project: <a href="https://github.com/Gopyr/GP-1">Gopyr/GP-1</a> — this board is a companion visualizer.</p>
+        <p style={{ opacity: 0.7, marginTop: 4 }}>Visual dashboard for <a href="https://github.com/Gopyr/GP-1" target="_blank" rel="noreferrer">GP-1</a> JSON reports. Upload up to 2 reports to compare. Runs 100% in-browser. No data leaves your device.</p>
+        <p style={{ fontSize: 12, opacity: 0.5, marginTop: 4 }}>Main project: <a href="https://github.com/Gopyr/GP-1">Gopyr/GP-1</a>. This board is a companion visualizer.</p>
       </header>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
@@ -145,13 +181,13 @@ export default function App() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        <ReportCard title="Report A — Metrics" report={a} color="#60a5fa" />
-        <ReportCard title="Report B — Metrics" report={b} color="#a78bfa" />
+        <ReportCard title="Report A. Metrics" report={a} color="#60a5fa" />
+        <ReportCard title="Report B. Metrics" report={b} color="#a78bfa" />
       </div>
 
       {bothLoaded && (
         <div style={{ ...card, marginTop: 16 }}>
-          <h3 style={{ marginBottom: 12 }}>Comparison — A vs B</h3>
+          <h3 style={{ marginBottom: 12 }}>Comparison. A vs B</h3>
           <ComparisonTable a={a} b={b} />
         </div>
       )}
@@ -168,7 +204,7 @@ export default function App() {
       )}
 
       <footer style={{ marginTop: 32, fontSize: 12, opacity: 0.45, textAlign: 'center' }}>
-        Built for GP-1 reports. No tracking, no upload — parsing happens locally via FileReader.
+        Built for GP-1 reports. No tracking, no upload. Parsing happens locally via FileReader.
       </footer>
     </div>
   )
